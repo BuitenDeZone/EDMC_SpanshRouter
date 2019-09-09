@@ -3,7 +3,6 @@
 import os
 import sys
 import traceback
-import csv
 import subprocess
 import webbrowser
 import json
@@ -15,6 +14,7 @@ from time import sleep
 from monitor import monitor
 from . import AutoCompleter
 from . import PlaceHolderEntry
+from . import RouteManager
 from .updater import SpanshUpdater
 
 class SpanshRouter():
@@ -25,14 +25,13 @@ class SpanshRouter():
             
         self.update_available = False
         self.next_stop = "No route planned"
-        self.route = []
+        self.route = RouteManager.RouteManager(plugin_dir)
         self.next_wp_label = "Next waypoint: "
         self.jumpcountlbl_txt = "Estimated jumps left: "
         self.parent = None
         self.plugin_dir = plugin_dir
         self.save_route_path = os.path.join(plugin_dir, 'route.csv')
-        self.offset_file_path = os.path.join(plugin_dir, 'offset')
-        self.offset = 0
+
         self.jumps_left = 0
         self.error_txt = tk.StringVar()
         self.plot_error = "Error while trying to plot a route, please try again."
@@ -45,9 +44,9 @@ class SpanshRouter():
         self.frame.grid(sticky=tk.NSEW, columnspan=2)
 
         # Route info
-        self.waypoint_prev_btn = tk.Button(self.frame, text="^", command=self.goto_prev_waypoint)
         self.waypoint_btn = tk.Button(self.frame, text=self.next_wp_label + self.next_stop, command=self.copy_waypoint)
-        self.waypoint_next_btn = tk.Button(self.frame, text="v", command=self.goto_next_waypoint)
+        self.waypoint_prev_btn = tk.Button(self.frame, text="Previous", command=self.goto_prev_waypoint)
+        self.waypoint_next_btn = tk.Button(self.frame, text="Next", command=self.goto_next_waypoint)
         self.jumpcounttxt_lbl = tk.Label(self.frame, text=self.jumpcountlbl_txt + str(self.jumps_left))
         self.error_lbl = tk.Label(self.frame, textvariable=self.error_txt)
 
@@ -174,19 +173,19 @@ class SpanshRouter():
             self.clear_route_btn.grid_remove()
         else:
             self.waypoint_btn["text"] = self.next_wp_label + self.next_stop
-            self.jumpcounttxt_lbl["text"] = self.jumpcountlbl_txt + str(self.jumps_left)
+            self.jumpcounttxt_lbl["text"] = self.jumpcountlbl_txt + str(self.route.total_jumps_left())
             self.jumpcounttxt_lbl.grid()
 
             self.waypoint_prev_btn.grid()
             self.waypoint_btn.grid()
             self.waypoint_next_btn.grid()
 
-            if self.offset == 0:
+            if self.route.current_offset() == 0:
                 self.waypoint_prev_btn.config(state=tk.DISABLED)
             else:
                 self.waypoint_prev_btn.config(state=tk.NORMAL)
 
-                if self.offset == self.route.__len__()-1:
+                if self.route.targets_left() == 0:
                     self.waypoint_next_btn.config(state=tk.DISABLED)
                 else:
                     self.waypoint_next_btn.config(state=tk.NORMAL)
@@ -233,27 +232,9 @@ class SpanshRouter():
 
     #   -- END GUI part -- 
 
-
     def open_last_route(self):
         try:
-            with open(self.save_route_path, 'r') as csvfile:
-                route_reader = csv.reader(csvfile)
-
-                for row in route_reader:
-                    if row not in (None, "", []):
-                        self.route.append(row)
-
-                try:
-                    with open(self.offset_file_path, 'r') as offset_fh:
-                        self.offset = int(offset_fh.readline())
-
-                except:
-                    self.offset = 0
-
-            for row in self.route[self.offset:]:
-                self.jumps_left += int(row[1])
-
-            self.next_stop = self.route[self.offset][0]
+            self.next_stop = self.route.current_destination()
             self.copy_waypoint()
         except:
             print("No previously saved route.")
@@ -268,29 +249,25 @@ class SpanshRouter():
             self.parent.update()
 
     def goto_next_waypoint(self):
-        if self.offset < self.route.__len__()-1:
-            self.update_route(1)
+        self.route.next_target()
+        self.update_route_ui()
 
     def goto_prev_waypoint(self):
-        if self.offset > 0:
-            self.update_route(-1)
+        self.route.prev_target()
+        self.update_route_ui()
 
-    def update_route(self, direction=1):
-        if direction > 0:
-            self.jumps_left -= int(self.route[self.offset][1])
-            self.offset += 1
-        else:
-            self.offset -= 1
-            self.jumps_left += int(self.route[self.offset][1])
+    def update_route_ui(self):
+        self.jumps_left = self.route.total_jumps_left()
 
-        if self.offset >= self.route.__len__():
+        if self.route.targets_left() == 0:
             self.next_stop = "End of the road!"
             self.update_gui()
         else:
-            self.next_stop = self.route[self.offset][0]
+            self.next_stop = self.route.current_destination()
             self.update_gui()
             self.copy_waypoint()
-        self.save_offset()
+
+        self.route.write_route()
 
     def goto_changelog_page(self):
         changelog_url = 'https://github.com/CMDR-Kiel42/EDMC_SpanshRouter/blob/master/CHANGELOG.md#'
@@ -299,22 +276,9 @@ class SpanshRouter():
     
     def plot_csv(self):
         filename = filedialog.askopenfilename(filetypes = (("csv files", "*.csv"),))    # show an "Open" dialog box and return the path to the selected file
-
-        if filename.__len__() > 0:
-            with open(filename, 'r') as csvfile:
-                route_reader = csv.reader(csvfile)
-
-                # Skip the header
-                route_reader.next()
-
-                self.jumps_left = 0
-                for row in route_reader:
-                    if row not in (None, "", []):
-                        self.route.append([row[0], row[4]])
-                        self.jumps_left += int(row[4])
-
-            self.offset = 0
-            self.next_stop = self.route[0][0]
+        if os.path.exists(filename):
+            self.route.load_file_spansh(filename, True)
+            self.next_stop = self.route.current_destination()
             self.copy_waypoint()
             self.update_gui()
             self.save_all_route()
@@ -348,7 +312,7 @@ class SpanshRouter():
                     self.enable_plot_gui(False)
                     
                     tries = 0
-                    while(tries < 20):
+                    while tries < 20:
                         response = json.loads(results.content)
                         job = response["job"]
 
@@ -361,15 +325,13 @@ class SpanshRouter():
 
                     if route_response:
                         if route_response.status_code == 200:
-                            route = json.loads(route_response.content)["result"]["system_jumps"]
                             self.clear_route(show_dialog=False)
-                            for waypoint in route:
-                                self.route.append([waypoint["system"], str(waypoint["jumps"])])
-                                self.jumps_left += waypoint["jumps"]
+                            self.route.load_json_spansh(route_response.content)
                             self.enable_plot_gui(True)
                             self.show_plot_gui(False)
-                            self.offset = 1 if self.route[0][0] == monitor.system else 0
-                            self.next_stop = self.route[self.offset][0] 
+                            if self.route.current_destination() == monitor.system:
+                                self.route.next_target()
+                            self.next_stop = self.route.current_destination()
                             self.copy_waypoint()
                             self.update_gui()
                             self.save_all_route()
@@ -415,45 +377,17 @@ class SpanshRouter():
         clear = confirmDialog.askyesno("SpanshRouter","Are you sure you want to clear the current route?") if show_dialog else True
 
         if clear:
-            self.offset = 0
-            self.route = []
+            self.route.clear()
             self.next_waypoint = ""
             self.jumps_left = 0
-            try:
-                os.remove(self.save_route_path)
-            except:
-                print("No route to delete")
-            try:
-                os.remove(self.offset_file_path)
-            except:
-                print("No offset file to delete")
-
             self.update_gui()
 
     def save_all_route(self):
         self.save_route()
-        self.save_offset()
+
 
     def save_route(self):
-        if self.route.__len__() != 0:
-            with open(self.save_route_path, 'w') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerows(self.route)
-        else:
-            try:
-                os.remove(self.save_route_path)
-            except:
-                print("No route to delete")
-    
-    def save_offset(self):
-        if self.route.__len__() != 0:
-            with open(self.offset_file_path, 'w') as offset_fh:
-                offset_fh.write(str(self.offset))
-        else:
-            try:
-                os.remove(self.offset_file_path)
-            except:
-                print("No offset to delete")
+        self.route.write_route()
 
     def check_range(self, name, index, mode):
         value = self.range_entry.var.get()
@@ -467,6 +401,14 @@ class SpanshRouter():
                 self.range_entry.set_error_style()
 
     def cleanup_old_version(self):
+        try:
+            if os.path.exists(os.path.join(self.plugin_dir, 'offset')):
+                os.remove(os.path.join(self.plugin_dir, 'offset'))
+        except:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            lines = traceback.format_exception(exc_type, exc_value, exc_traceback)
+            sys.stderr.write(''.join('!! ' + line for line in lines))
+
         try:
             if (os.path.exists(os.path.join(self.plugin_dir, "AutoCompleter.py"))
             and os.path.exists(os.path.join(self.plugin_dir, "SpanshRouter"))):
